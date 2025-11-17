@@ -1,6 +1,6 @@
 # app.py
-# Test Stand UI — Upper Window + "Set Test Profile" page (PySide6)
-# Focused on readability and future extensibility.
+# Test Stand UI — Upper Window + fully functional "Set Test Profile" page.
+# PySide6 + QtCharts, written for clarity and maintainability.
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import csv
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
-from PySide6.QtCore import Qt, QSize, QRect
-from PySide6.QtGui import QPainter, QPen, QFont, QAction
+from PySide6.QtCore import Qt, QSize, QRect, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -34,6 +34,9 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
+# QtCharts lives under PySide6.QtCharts
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+
 
 # ---------- Small helpers ----------
 
@@ -42,62 +45,6 @@ class HLine(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.HLine)
         self.setFrameShadow(QFrame.Sunken)
-
-
-class PlotPlaceholder(QWidget):
-    """
-    Minimal 'plot' placeholder with a title, axes, and a simple step-like sketch.
-    Replace with QtCharts/pyqtgraph later without touching page layout.
-    """
-    def __init__(self, title: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._title = title
-        self.setMinimumSize(QSize(420, 260))
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        rect = self.rect().adjusted(10, 10, -10, -10)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-
-        # Frame
-        pen = QPen(self.palette().mid().color())
-        pen.setWidth(2)
-        p.setPen(pen)
-        p.drawRoundedRect(rect, 12, 12)
-
-        # Title
-        title_rect = QRect(rect.left(), rect.top(), rect.width(), 26)
-        p.setPen(self.palette().windowText().color())
-        title_font = QFont(self.font()); title_font.setBold(True)
-        p.setFont(title_font)
-        p.drawText(title_rect, Qt.AlignCenter, self._title)
-
-        # Axes
-        area = rect.adjusted(16, 30, -16, -16)
-        p.setPen(self.palette().mid().color())
-        p.drawLine(area.bottomLeft(), area.topLeft())
-        p.drawLine(area.bottomLeft(), area.bottomRight())
-
-        # Axis labels
-        lab = QFont(self.font()); lab.setPointSizeF(max(8.0, lab.pointSizeF()))
-        p.setFont(lab); p.setPen(self.palette().windowText().color())
-        p.drawText(area.left() - 6, area.top() + 10, "Target")
-        p.drawText(area.right() - 24, area.bottom() + 14, "Time")
-
-        # Step sketch
-        p.setPen(self.palette().windowText().color())
-        left = area.left() + int(area.width() * 0.08)
-        mid1 = area.left() + int(area.width() * 0.35)
-        mid2 = area.left() + int(area.width() * 0.70)
-        y_hi = area.top() + int(area.height() * 0.15)
-        y_mid = area.top() + int(area.height() * 0.55)
-        y_lo = area.bottom() - 2
-        p.drawLine(left, y_lo, left, y_hi)
-        p.drawLine(left, y_hi, mid1, y_hi)
-        p.drawLine(mid1, y_hi, mid1, y_mid)
-        p.drawLine(mid1, y_mid, mid2, y_mid)
-        p.drawLine(mid2, y_mid, mid2, y_lo)
 
 
 class CircleGaugePlaceholder(QWidget):
@@ -114,14 +61,11 @@ class CircleGaugePlaceholder(QWidget):
         cx, cy = self.width() // 2, self.height() // 2 + 6
         r = max(40, size // 2)
 
-        pen = QPen(self.palette().mid().color()); pen.setWidth(2)
-        p.setPen(pen); p.drawEllipse(cx - r, cy - r, 2 * r, 2 * r)
+        p.setPen(self.palette().mid().color())
+        p.drawEllipse(cx - r, cy - r, 2 * r, 2 * r)
 
         p.setPen(self.palette().windowText().color())
-        title = QFont(self.font()); title.setBold(True); p.setFont(title)
         p.drawText(0, 2, self.width(), 22, Qt.AlignHCenter | Qt.AlignVCenter, self._title)
-
-        dash = QFont(self.font()); dash.setPointSizeF(max(10.0, dash.pointSizeF())); p.setFont(dash)
         p.drawText(0, cy - 10, self.width(), 20, Qt.AlignCenter, "—")
 
 
@@ -129,12 +73,14 @@ class CircleGaugePlaceholder(QWidget):
 
 class SetProfilePage(QWidget):
     """
-    Implements the lower 'Set Test Profile' frame:
-      - Left: editable table [Time, Target]
-      - Center: plot placeholder
-      - Right: target selector (% Load / RPM / % Throttle)
-      - Bottom: Load Profile CSV + Back
+    Lower frame (editor) with a live-synced step plot.
+      - Left: table [Time, Target] (+ Add / Remove)
+      - Center: QtCharts step plot with axis labels
+      - Right: Target selector
+      - Bottom: Load CSV / Save CSV / Back
     """
+    backRequested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
@@ -143,16 +89,17 @@ class SetProfilePage(QWidget):
         root.setSpacing(10)
 
         title = QLabel("Set Test Profile")
-        title_font = title.font(); title_font.setBold(True); title_font.setPointSize(title_font.pointSize() + 2)
-        title.setFont(title_font)
+        f = title.font(); f.setBold(True); f.setPointSize(f.pointSize() + 2)
+        title.setFont(f)
         root.addWidget(title)
         root.addWidget(HLine())
 
+        # --- Main content row ---
         content = QHBoxLayout()
         content.setSpacing(12)
         root.addLayout(content, 1)
 
-        # --- Left: Table ---
+        # Left: Table + Add/Remove
         left_box = QGroupBox("Test Profile Table")
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(8, 8, 8, 8)
@@ -160,21 +107,55 @@ class SetProfilePage(QWidget):
         self.table = QTableWidget(0, 2, self)
         self.table.setHorizontalHeaderLabels(["Time", "Target"])
         self.table.verticalHeader().setVisible(False)
-        self.table.setMinimumWidth(260)
-        self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed | QTableWidget.AnyKeyPressed)
+        self.table.setMinimumWidth(280)
+        self.table.setEditTriggers(
+            QTableWidget.DoubleClicked | QTableWidget.SelectedClicked |
+            QTableWidget.EditKeyPressed | QTableWidget.AnyKeyPressed
+        )
         left_layout.addWidget(self.table, 1)
 
-        # Seed with example rows from the sketch
-        for t, v in [(0, 20), (1, 90), (3, 50), (4, 20), (5, 0)]:
-            self._append_row(t, v)
+        btn_row = QHBoxLayout()
+        self.btn_add = QPushButton("Add Row")
+        self.btn_remove = QPushButton("Remove Row")
+        for b in (self.btn_add, self.btn_remove):
+            b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        btn_row.addWidget(self.btn_add)
+        btn_row.addWidget(self.btn_remove)
+        left_layout.addLayout(btn_row)
 
         content.addWidget(left_box, 1)
 
-        # --- Center: Plot ---
-        self.plot = PlotPlaceholder("Test Profile")
-        content.addWidget(self.plot, 2)
+        # Center: QtCharts step plot
+        chart_box = QGroupBox("Profile")
+        chart_layout = QVBoxLayout(chart_box)
+        chart_layout.setContentsMargins(8, 8, 8, 8)
 
-        # --- Right: Target selector ---
+        self.chart = QChart()
+        self.chart.legend().hide()
+        self.chart.setTitle("Test Profile")
+
+        # Axes with titles
+        self.axis_x = QValueAxis()
+        self.axis_x.setTitleText("Time")
+        self.axis_x.setLabelFormat("%.0f")
+        self.chart.addAxis(self.axis_x, Qt.AlignBottom)
+
+        self.axis_y = QValueAxis()
+        self.axis_y.setTitleText("Target")
+        self.axis_y.setLabelFormat("%.0f")
+        self.chart.addAxis(self.axis_y, Qt.AlignLeft)
+
+        self.series = QLineSeries()
+        self.chart.addSeries(self.series)
+        self.series.attachAxis(self.axis_x)
+        self.series.attachAxis(self.axis_y)
+
+        self.chart_view = QChartView(self.chart)
+        self.chart_view.setRenderHint(QPainter.Antialiasing)
+        chart_layout.addWidget(self.chart_view)
+        content.addWidget(chart_box, 2)
+
+        # Right: Target selector
         right_box = QGroupBox("Target")
         right_layout = QVBoxLayout(right_box)
         right_layout.setContentsMargins(8, 8, 8, 8)
@@ -188,73 +169,197 @@ class SetProfilePage(QWidget):
         for rb in (self.rb_load, self.rb_rpm, self.rb_throttle):
             self.target_group.addButton(rb)
             right_layout.addWidget(rb)
-
         right_layout.addStretch(1)
+
         content.addWidget(right_box, 0)
 
         root.addWidget(HLine())
 
-        # --- Bottom buttons ---
+        # Bottom: file ops + back
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
-        root.addLayout(bottom)
-
         self.btn_load_csv = QPushButton("Load Profile CSV")
+        self.btn_save_csv = QPushButton("Save Profile CSV")
         self.btn_back = QPushButton("Back")
         self.btn_back.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
         bottom.addWidget(self.btn_load_csv)
+        bottom.addWidget(self.btn_save_csv)
         bottom.addStretch(1)
         bottom.addWidget(self.btn_back)
+        root.addLayout(bottom)
 
-        # Wire actions
+        # Seed with example rows
+        for t, v in [(0, 20), (1, 90), (3, 50), (4, 20), (5, 0)]:
+            self._append_row(t, v)
+
+        # Signals
+        self.btn_add.clicked.connect(self._on_add_row)
+        self.btn_remove.clicked.connect(self._on_remove_row)
+        self.table.itemChanged.connect(self._on_table_changed)
         self.btn_load_csv.clicked.connect(self._on_load_csv)
+        self.btn_save_csv.clicked.connect(self._on_save_csv)
+        self.btn_back.clicked.connect(self.backRequested.emit)
 
-    # ---- API for host window ----
+        # Draw initial chart
+        self._update_chart_from_table()
 
-    def on_back_requested(self, slot) -> None:
-        self.btn_back.clicked.connect(slot)
-
-    # ---- Internals ----
+    # ---- Table helpers ----
 
     def _append_row(self, t: float, v: float) -> None:
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(str(t)))
-        self.table.setItem(row, 1, QTableWidgetItem(str(v)))
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QTableWidgetItem(str(t)))
+        self.table.setItem(r, 1, QTableWidgetItem(str(v)))
+
+    def _on_add_row(self) -> None:
+        # Default: last time + 1, last target (or 0)
+        data = self._read_table(silent=True)
+        if data:
+            last_t, last_v = data[-1]
+            self._append_row(last_t + 1, last_v)
+        else:
+            self._append_row(0, 0)
+
+        self._update_chart_from_table()
+
+    def _on_remove_row(self) -> None:
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+        if not rows and self.table.rowCount() > 0:
+            rows = [self.table.rowCount() - 1]  # remove last if none selected
+        for r in rows:
+            self.table.removeRow(r)
+        self._update_chart_from_table()
+
+    def _on_table_changed(self, _item: QTableWidgetItem) -> None:
+        # Validate numeric cells; color invalid ones.
+        for r in range(self.table.rowCount()):
+            for c in (0, 1):
+                item = self.table.item(r, c)
+                if item is None:
+                    continue
+                ok = self._is_float(item.text())
+                item.setBackground(Qt.transparent if ok else Qt.red)
+        self._update_chart_from_table()
+
+    # ---- CSV IO ----
 
     def _on_load_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Load Profile CSV", "", "CSV Files (*.csv);;All Files (*)")
         if not path:
             return
-
         try:
+            rows: List[Tuple[float, float]] = []
             with open(path, "r", newline="") as f:
                 reader = csv.reader(f)
-                rows = list(reader)
+                for r in reader:
+                    if len(r) < 2:
+                        continue
+                    try:
+                        t = float(r[0]); v = float(r[1])
+                        rows.append((t, v))
+                    except ValueError:
+                        # Skip headers/bad lines
+                        continue
+            if not rows:
+                QMessageBox.information(self, "No Data", "No valid numeric rows found (expected: time,target).")
+                return
+            self.table.setRowCount(0)
+            for t, v in rows:
+                self._append_row(t, v)
+            self._update_chart_from_table()
         except Exception as e:
             QMessageBox.warning(self, "Load Failed", f"Could not read file:\n{e}")
+
+    def _on_save_csv(self) -> None:
+        data = self._read_table(silent=False)
+        if not data:
+            QMessageBox.information(self, "Nothing to Save", "Table is empty or has invalid values.")
             return
-
-        # Expect two columns: time, target
-        cleaned: List[tuple[float, float]] = []
-        for r in rows:
-            if len(r) < 2:
-                continue
-            try:
-                t = float(r[0]); v = float(r[1])
-                cleaned.append((t, v))
-            except ValueError:
-                # Skip header or bad lines
-                continue
-
-        if not cleaned:
-            QMessageBox.information(self, "No Data", "No valid rows found (expected two numeric columns: time, target).")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Profile CSV", "profile.csv", "CSV Files (*.csv)")
+        if not path:
             return
+        try:
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "target"])
+                for t, v in data:
+                    writer.writerow([t, v])
+            QMessageBox.information(self, "Saved", f"Profile saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Failed", f"Could not save file:\n{e}")
 
-        self.table.setRowCount(0)
-        for t, v in cleaned:
-            self._append_row(t, v)
+    # ---- Chart sync ----
+
+    def _read_table(self, *, silent: bool) -> List[Tuple[float, float]]:
+        """
+        Returns numeric (time, target) rows.
+        If `silent` is False, invalid cells cause the row to be dropped and a warning shown later.
+        """
+        data: List[Tuple[float, float]] = []
+        bad = False
+        for r in range(self.table.rowCount()):
+            it_t = self.table.item(r, 0)
+            it_v = self.table.item(r, 1)
+            if it_t is None or it_v is None:
+                continue
+            t_s, v_s = it_t.text().strip(), it_v.text().strip()
+            if not (self._is_float(t_s) and self._is_float(v_s)):
+                bad = True
+                continue
+            data.append((float(t_s), float(v_s)))
+
+        # sort by time so the plot is well formed
+        data.sort(key=lambda tv: tv[0])
+
+        if bad and not silent:
+            QMessageBox.warning(self, "Invalid Rows", "Some rows were skipped due to non-numeric values.")
+        return data
+
+    def _update_chart_from_table(self) -> None:
+        data = self._read_table(silent=True)
+
+        # Build a step series: for each segment we add (t_i, v_i) and (t_{i+1}, v_i)
+        step_points: List[Tuple[float, float]] = []
+        if data:
+            # Start at first time with first value
+            t0, v0 = data[0]
+            step_points.append((t0, v0))
+            for (t_prev, v_prev), (t_next, v_next) in zip(data[:-1], data[1:]):
+                # Horizontal to next time, then vertical jump (implicit by next point)
+                step_points.append((t_next, v_prev))
+                step_points.append((t_next, v_next))
+        # Update series
+        self.series.clear()
+        for x, y in step_points:
+            self.series.append(x, y)
+
+        # Auto-set axes even when empty
+        if data:
+            t_vals = [t for t, _ in data]
+            v_vals = [v for _, v in data]
+            t_min, t_max = min(t_vals), max(t_vals)
+            v_min, v_max = min(v_vals), max(v_vals)
+            if t_min == t_max:
+                t_min -= 1.0
+                t_max += 1.0
+            if v_min == v_max:
+                v_min -= 1.0
+                v_max += 1.0
+        else:
+            t_min, t_max, v_min, v_max = 0.0, 5.0, 0.0, 100.0
+
+        pad_x = 0.05 * (t_max - t_min)
+        pad_y = 0.10 * (v_max - v_min)
+        self.axis_x.setRange(t_min - pad_x, t_max + pad_x)
+        self.axis_y.setRange(v_min - pad_y, v_max + pad_y)
+
+    @staticmethod
+    def _is_float(s: str) -> bool:
+        try:
+            float(s)
+            return True
+        except Exception:
+            return False
 
 
 # ---------- Upper (first) page ----------
@@ -272,9 +377,17 @@ class UpperPage(QWidget):
         top.addWidget(self.rb_manual); top.addWidget(self.rb_auto); top.addSpacing(16); top.addWidget(self.btn_set_profile); top.addStretch(1)
         root.addLayout(top); root.addWidget(HLine())
 
-        # Middle: plot + gauges
+        # Middle: plot placeholder + gauge placeholders
         mid = QHBoxLayout(); mid.setSpacing(12)
-        left_plot = PlotPlaceholder("Test Profile"); mid.addWidget(left_plot, 2)
+
+        # Simple label placeholder for the main plot
+        plot_box = QGroupBox("")
+        plot_layout = QVBoxLayout(plot_box)
+        lbl = QLabel("Test Profile (placeholder)")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setMinimumHeight(300)
+        plot_layout.addWidget(lbl)
+        mid.addWidget(plot_box, 2)
 
         gauges_box = QGroupBox("")
         g = QGridLayout(gauges_box); g.setContentsMargins(8, 8, 8, 8); g.setHorizontalSpacing(10); g.setVerticalSpacing(10)
@@ -305,7 +418,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Test Stand UI")
-        self.resize(1220, 720)
+        self.resize(1240, 760)
 
         self.pages = QStackedWidget(self)
         self.setCentralWidget(self.pages)
@@ -316,12 +429,8 @@ class MainWindow(QMainWindow):
 
         # Page 1: Set Profile
         self.set_profile = SetProfilePage()
-        self.set_profile.on_back_requested(self._open_upper)
+        self.set_profile.backRequested.connect(self._open_upper)
         self.pages.addWidget(self.set_profile)
-
-        # Menu shortcut for navigation (optional)
-        back_act = QAction("Back to Main", self); back_act.setShortcut("Esc"); back_act.triggered.connect(self._open_upper)
-        self.addAction(back_act)
 
         self.statusBar().showMessage("Ready")
 
