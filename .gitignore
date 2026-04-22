@@ -13,8 +13,7 @@ dist/
 build/
 *.egg-info/
 
-# Data files
-*.csv
+# Logs
 *.log
 
 # OS
