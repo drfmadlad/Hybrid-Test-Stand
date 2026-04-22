@@ -1,0 +1,18 @@
+{
+    "folders": [
+        {
+            "name": "Hybrid Test Stand",
+            "path": "."
+        },
+        {
+            "name": "Firmware (PlatformIO)",
+            "path": "firmware"
+        }
+    ],
+    "settings": {
+        "files.exclude": {
+            "**/.venv": true,
+            "**/firmware/.pio": true
+        }
+    }
+}
