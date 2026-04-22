@@ -19,3 +19,13 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# PlatformIO build artifacts
+firmware/.pio/
+firmware/tools/venv/
+
+# VS Code (PlatformIO generated)
+firmware/.vscode/c_cpp_properties.json
+firmware/.vscode/launch.json
+firmware/.vscode/ipch
+firmware/.vscode/.browse.c_cpp.db*
