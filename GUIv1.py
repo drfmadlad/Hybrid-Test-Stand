@@ -436,9 +436,13 @@ class SetProfilePage(QWidget):
                 QMessageBox.information(self, "No Data",
                                         "Expected two numeric columns: time,target")
                 return
-            self.table.setRowCount(0)
-            for t, v in rows:
-                self._append_row(t, v)
+            self.table.blockSignals(True)
+            try:
+                self.table.setRowCount(0)
+                for t, v in rows:
+                    self._append_row(t, v)
+            finally:
+                self.table.blockSignals(False)
             self._update_chart_from_table()
             self._emit_profile_changed()
         except Exception as e:
