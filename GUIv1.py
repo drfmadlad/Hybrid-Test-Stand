@@ -10,6 +10,8 @@ import queue
 import sys
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 import serial
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QGroupBox, QFrame, QTableWidget, QTableWidgetItem,
     QPushButton, QRadioButton, QButtonGroup, QCheckBox, QLabel,
     QFileDialog, QMessageBox, QSizePolicy, QComboBox, QSlider, QSpinBox,
+    QDialog,
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
@@ -33,6 +36,91 @@ class HLine(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.HLine)
         self.setFrameShadow(QFrame.Sunken)
+
+
+# ── Servo Calibration Dialog ──────────────────────────────────────────────────
+
+class CalibrationDialog(QDialog):
+    """Modal dialog for jogging the servo by raw µs and locking end limits."""
+
+    def __init__(self, send_cmd, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Servo Calibration")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self._send = send_cmd
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+
+        # ── Jog control ──────────────────────────────────────────────────────
+        jog_box = QGroupBox("Jog Servo (raw µs)")
+        jog_layout = QVBoxLayout(jog_box)
+        jog_layout.setContentsMargins(8, 8, 8, 8)
+
+        jog_row = QHBoxLayout(); jog_row.setSpacing(8)
+        self.us_slider = QSlider(Qt.Horizontal)
+        self.us_slider.setRange(500, 2500)
+        self.us_slider.setValue(1500)
+        self.us_spin = QSpinBox()
+        self.us_spin.setRange(500, 2500)
+        self.us_spin.setSuffix(" µs")
+        self.us_spin.setValue(1500)
+        jog_row.addWidget(self.us_slider, 1)
+        jog_row.addWidget(self.us_spin)
+        jog_layout.addLayout(jog_row)
+
+        hint = QLabel("Move slider to position servo, then set limits below.")
+        hint.setStyleSheet("color: gray; font-size: 10px;")
+        jog_layout.addWidget(hint)
+
+        self.us_slider.valueChanged.connect(self.us_spin.setValue)
+        self.us_spin.valueChanged.connect(self.us_slider.setValue)
+        self.us_slider.valueChanged.connect(lambda us: self._send(f"u{us}"))
+
+        root.addWidget(jog_box)
+
+        # ── End limits ───────────────────────────────────────────────────────
+        limits_box = QGroupBox("End Limits")
+        limits_grid = QGridLayout(limits_box)
+        limits_grid.setContentsMargins(8, 8, 8, 8)
+        limits_grid.setSpacing(8)
+
+        self.btn_set_min = QPushButton("Set as Closed  (0 %)")
+        self.lbl_min = QLabel("—")
+        self.btn_set_max = QPushButton("Set as Full (100 %)")
+        self.lbl_max = QLabel("—")
+
+        limits_grid.addWidget(self.btn_set_min, 0, 0)
+        limits_grid.addWidget(self.lbl_min,     0, 1)
+        limits_grid.addWidget(self.btn_set_max, 1, 0)
+        limits_grid.addWidget(self.lbl_max,     1, 1)
+
+        self.btn_set_min.clicked.connect(self._on_set_min)
+        self.btn_set_max.clicked.connect(self._on_set_max)
+
+        root.addWidget(limits_box)
+
+        # ── Sweep + Done ──────────────────────────────────────────────────────
+        bottom = QHBoxLayout(); bottom.setSpacing(8)
+        self.btn_sweep = QPushButton("Sweep Test")
+        self.btn_sweep.clicked.connect(lambda: self._send("w"))
+        self.btn_done = QPushButton("Done")
+        self.btn_done.clicked.connect(self.accept)
+        bottom.addWidget(self.btn_sweep)
+        bottom.addStretch(1)
+        bottom.addWidget(self.btn_done)
+        root.addLayout(bottom)
+
+    def _on_set_min(self) -> None:
+        us = self.us_spin.value()
+        self._send("setmin")
+        self.lbl_min.setText(f"{us} µs  ← closed")
+
+    def _on_set_max(self) -> None:
+        us = self.us_spin.value()
+        self._send("setmax")
+        self.lbl_max.setText(f"{us} µs  ← full open")
 
 
 # ── Gauge Widget ─────────────────────────────────────────────────────────────
@@ -515,9 +603,9 @@ class UpperPage(QWidget):
         # (title, unit, decimals)
         gauge_defs = [
             ("RPM",      "",     0),
-            ("AFR",      "",     1),
+            ("Lambda",   "",     3),
             ("Throttle", "%",    1),
-            ("Battery",  "V",    2),
+            ("Altitude",  "m",    1),
             ("Coolant",  "\u00b0C", 0),
             ("Fuel",     "%",    0),
             ("Flow",     "ml/m", 1),
@@ -557,6 +645,10 @@ class UpperPage(QWidget):
         self.throttle_slider.valueChanged.connect(self.throttle_spin.setValue)
         self.throttle_spin.valueChanged.connect(self.throttle_slider.setValue)
         self.throttle_slider.valueChanged.connect(self._on_throttle_changed)
+
+        self.btn_calibrate = QPushButton("Calibrate Servo")
+        bottom.addSpacing(8)
+        bottom.addWidget(self.btn_calibrate)
 
         bottom.addStretch(1)
 
@@ -601,13 +693,10 @@ class UpperPage(QWidget):
         g["RPM"].set_value(rpm)
 
         lam = data.get("lambda")
-        if lam is not None and not math.isnan(lam):
-            g["AFR"].set_value(lam * 14.7)
-        else:
-            g["AFR"].set_value(None)
+        g["Lambda"].set_value(lam if (lam is not None and not math.isnan(lam)) else None)
 
         g["Throttle"].set_value(data.get("servo_pct"))
-        g["Battery"].set_value(data.get("batt_v"))
+        g["Altitude"].set_value(data.get("bmp_alt"))
         g["Coolant"].set_value(data.get("coolant"))
         g["Fuel"].set_value(data.get("fuel_pct"))
         g["Flow"].set_value(data.get("flow"))
@@ -692,8 +781,38 @@ class MainWindow(QMainWindow):
         # Throttle command -> serial
         self.upper.throttle_command.connect(self.serial_worker.send)
 
-        # STOP button -> close throttle
+        # STOP button -> close throttle + abort profile
         self.upper.btn_stop.clicked.connect(self._on_stop)
+
+        # Servo calibration dialog
+        self.upper.btn_calibrate.clicked.connect(self._open_calibration)
+
+        # Profile storage (kept in sync whenever the editor changes)
+        self._profile_data: List[Tuple[float, float]] = []
+        self._profile_target: str = "% Throttle"
+        self.set_profile.profileChanged.connect(self._on_profile_changed)
+
+        # Profile runner
+        self._profile_start: float | None = None
+        self._profile_timer = QTimer(self)
+        self._profile_timer.setInterval(100)
+        self._profile_timer.timeout.connect(self._tick_profile)
+        self.upper.btn_run.clicked.connect(self._on_run_profile)
+
+        # Data logging
+        self._log_file = None
+        self._log_writer = None
+        self._last_telemetry: dict = {}
+        self.serial_worker.telemetry.connect(self._on_telemetry)
+        self.upper.chk_logging.toggled.connect(self._on_logging_toggled)
+
+    def _open_calibration(self) -> None:
+        if not self.serial_worker.is_open:
+            QMessageBox.warning(self, "Not Connected",
+                                "Connect to the Teensy before calibrating.")
+            return
+        dlg = CalibrationDialog(self.serial_worker.send, parent=self)
+        dlg.exec()
 
     def _open_set_profile(self) -> None:
         self.pages.setCurrentWidget(self.set_profile)
@@ -720,18 +839,120 @@ class MainWindow(QMainWindow):
             self.upper.btn_connect.setText("Connect")
             self.serial_worker.disconnect_port()
 
+    def _on_stop(self) -> None:
+        self._stop_profile()
+        self.serial_worker.send("z")
+        self.upper.throttle_slider.setValue(0)
+
+    # ── profile ──────────────────────────────────────────────────────────────
+
+    def _on_profile_changed(self, data: List[Tuple[float, float]], target: str) -> None:
+        self._profile_data = data
+        self._profile_target = target
+
+    def _on_run_profile(self) -> None:
+        if not self._profile_data:
+            QMessageBox.information(self, "No Profile", "Define a test profile first.")
+            return
+        if not self.serial_worker.is_open:
+            QMessageBox.warning(self, "Not Connected", "Connect to the Teensy first.")
+            return
+        self._profile_start = time.monotonic()
+        self._profile_timer.start()
+        self.upper.btn_run.setEnabled(False)
+        self.statusBar().showMessage("Profile running…")
+
+    def _tick_profile(self) -> None:
+        elapsed = time.monotonic() - self._profile_start
+        data = self._profile_data
+
+        # Step interpolation: hold each waypoint value until the next one
+        val = data[0][1]
+        for t, v in data:
+            if t <= elapsed:
+                val = v
+            else:
+                break
+
+        if elapsed > data[-1][0]:
+            self._stop_profile()
+            return
+
+        if self._profile_target == "RPM":
+            rpm = self._last_telemetry.get("rpm", math.nan)
+            if rpm is not None and not math.isnan(rpm):
+                error = val - rpm
+                new_th = self.upper.throttle_slider.value() + error / 50.0
+                cmd = int(round(max(0.0, min(100.0, new_th))))
+            else:
+                return
+        else:
+            # "% Throttle" and "% Load" both command throttle directly
+            cmd = int(round(max(0.0, min(100.0, val))))
+
+        self.serial_worker.send(f"t{cmd}")
+        self.upper.throttle_slider.blockSignals(True)
+        self.upper.throttle_slider.setValue(cmd)
+        self.upper.throttle_slider.blockSignals(False)
+        self.upper.throttle_spin.blockSignals(True)
+        self.upper.throttle_spin.setValue(cmd)
+        self.upper.throttle_spin.blockSignals(False)
+
+    def _stop_profile(self) -> None:
+        if self._profile_timer.isActive():
+            self._profile_timer.stop()
+            self.serial_worker.send("t0")
+            self.upper.throttle_slider.setValue(0)
+            self.upper.throttle_spin.setValue(0)
+        self._profile_start = None
+        self.upper.btn_run.setEnabled(True)
+        self.statusBar().showMessage("Profile stopped.", 3000)
+
+    # ── data logging ─────────────────────────────────────────────────────────
+
+    def _on_telemetry(self, data: dict) -> None:
+        self._last_telemetry = data
+        if self._log_writer is not None:
+            self._log_writer.writerow([
+                data.get("ms", ""),      data.get("rpm", ""),
+                data.get("coolant", ""), data.get("fuel_pct", ""),
+                data.get("lambda", ""),  data.get("bmp_temp", ""),
+                data.get("bmp_press", ""), data.get("bmp_alt", ""),
+                data.get("flow", ""),    data.get("servo_pct", ""),
+            ])
+
+    def _on_logging_toggled(self, checked: bool) -> None:
+        if checked:
+            fname = f"test_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            self._log_file = open(Path(__file__).parent / fname, "w", newline="")
+            self._log_writer = csv.writer(self._log_file)
+            self._log_writer.writerow([
+                "ms", "rpm", "coolant_c", "fuel_pct", "lambda",
+                "bmp_temp_c", "bmp_hpa", "bmp_alt_m", "flow_ml_min", "servo_pct",
+            ])
+            self.statusBar().showMessage(f"Logging → {fname}", 4000)
+        else:
+            self._stop_logging()
+
+    def _stop_logging(self) -> None:
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
+            self._log_writer = None
+            self.statusBar().showMessage("Log closed.", 3000)
+
     def _on_connection_changed(self, connected: bool, message: str) -> None:
         self.upper.lbl_status.setText(message)
         self.statusBar().showMessage(message, 3000)
         if not connected:
             self.upper.btn_connect.setChecked(False)
             self.upper.btn_connect.setText("Connect")
-
-    def _on_stop(self) -> None:
-        self.serial_worker.send("z")
-        self.upper.throttle_slider.setValue(0)
+            self._stop_profile()
+            self.upper.chk_logging.setChecked(False)
 
     def closeEvent(self, event) -> None:
+        self._stop_profile()
+        self._stop_logging()
         self.serial_worker.disconnect_port()
         super().closeEvent(event)
 

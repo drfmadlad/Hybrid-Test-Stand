@@ -147,7 +147,7 @@ def decode_hours(d):
 
 def decode_vep(d):
     """PGN 0xFEF7 — Vehicle Electrical Power"""
-    raw = _u16le(d, 2)   # Battery voltage SPN 168 is at bytes 3-4 (0-indexed 2-3)
+    raw = _u16le(d, 4)   # SPN 168 (Electrical Potential) is at bytes 5-6 (0-indexed 4-5)
     return {"BattV": _fmt(raw, 0.05, "V", 2)}
 
 def decode_fefc(d):
@@ -245,6 +245,7 @@ def _reader():
                     f"[green]Connected[/green]  {PORT} @ {BAUD // 1000} kbaud"
                     f"  →  [bold]{_log_name}[/bold]"
                 )
+                ser.write(b"d\n")   # enable raw CAN dump so we get $C, frames
                 while True:
                     try:
                         line = ser.readline().decode("ascii", errors="replace").strip()
@@ -256,8 +257,11 @@ def _reader():
 
                     _log_file.write(line + "\n")
 
-                    if line.startswith("#"):
+                    if line.startswith("#") or line.startswith("$T"):
                         continue
+
+                    if line.startswith("$C,"):
+                        line = line[3:]  # strip "$C," prefix added by current firmware
 
                     parts = line.split(",")
                     if len(parts) < 13:

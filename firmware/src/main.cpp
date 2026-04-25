@@ -147,9 +147,9 @@ static void j1939Decode(uint32_t canId, const uint8_t* d, uint8_t len) {
             if (len >= 1 && d[0] != 0xFF)
                 canCoolant = (float)d[0] - 40.0f;
             break;
-        case 0xFEF7:   // VEP — Battery Voltage (SPN 168)
-            if (len >= 4) {
-                uint16_t raw = (uint16_t)d[3] << 8 | d[2];
+        case 0xFEF7:   // VEP — Battery Voltage (SPN 168, bytes 5-6)
+            if (len >= 6) {
+                uint16_t raw = (uint16_t)d[5] << 8 | d[4];
                 if (raw != 0xFFFF) canBattV = raw * 0.05f;
             }
             break;

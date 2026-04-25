@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep '^$C,' /c/Users/hp/Desktop/Hybrid-Test-Stand/firmware/tools/can_log_20260422_135650.csv)",
+      "Bash(awk -F, ' *)",
+      "Bash(grep '^$C,.*0xCFF6600' /c/Users/hp/Desktop/Hybrid-Test-Stand/firmware/tools/can_log_20260422_135650.csv)",
+      "Bash(grep '^$T' /c/Users/hp/Desktop/Hybrid-Test-Stand/firmware/tools/can_log_20260422_135650.csv)",
+      "Bash(grep '^$C,.*0x18FEF5' firmware/tools/can_log_20260422_135650.csv)",
+      "Bash(grep '^$C,.*0x18FEF6\\\\|0xFEF6' firmware/tools/can_log_20260422_135650.csv)",
+      "Bash(grep '^$C,' firmware/tools/can_log_20260422_135650.csv)",
+      "Bash(awk -F',' '{print $4}')"
+    ]
+  }
+}
