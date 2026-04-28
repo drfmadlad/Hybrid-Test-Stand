@@ -1,1 +1,0 @@
-# Hybrid-Test-Stand
